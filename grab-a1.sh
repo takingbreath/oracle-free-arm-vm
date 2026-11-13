@@ -8,6 +8,10 @@
 #   ./grab-a1.sh --check      # find everything, launch nothing
 #   ./grab-a1.sh              # retry until the VM exists
 #
+# Phone messages: set NTFY_TOPIC (./ntfy-setup.sh does it). The script then
+# sends a message when it starts, every HEARTBEAT_HOURS, when the VM is ready,
+# and when it stops.
+#
 # Settings come from ./config.env (copy config.env.example). A setting that
 # config.env does not set can come from the environment. See README.md.
 #
@@ -22,7 +26,7 @@ if [ -f "$HERE/config.env" ]; then
   . "$HERE/config.env"
 fi
 
-OCI_PROFILE="${OCI_PROFILE:-DEFAULT}"
+OCI_PROFILE="${OCI_PROFILE:-ORACLE_A1}"            # made by: oci setup bootstrap --profile-name ORACLE_A1
 OCI_CONFIG_FILE="${OCI_CONFIG_FILE:-$HOME/.oci/config}"
 # Always Free A1 since 15 June 2026: 2 OCPUs + 12 GB in total per tenancy.
 OCPUS="${OCPUS:-2}"
@@ -38,10 +42,16 @@ AVAILABILITY_DOMAINS="${AVAILABILITY_DOMAINS:-}"  # empty = every AD in the regi
 RETRY_SECONDS="${RETRY_SECONDS:-60}"
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-0}"             # 0 = no limit
 LOG_FILE="${LOG_FILE:-$HERE/grab-a1.log}"
+PID_FILE="${PID_FILE:-$HERE/grab-a1.pid}"     # exists while the retry loop runs
+NTFY_TOPIC="${NTFY_TOPIC:-}"                  # empty = no phone messages
+NTFY_SERVER="${NTFY_SERVER:-https://ntfy.sh}"
+HEARTBEAT_HOURS="${HEARTBEAT_HOURS:-6}"       # "still trying" message; 0 = none
 
 SHAPE="VM.Standard.A1.Flex"
 FREE_OCPUS=2
 FREE_MEMORY_GB=12
+CHECK_ONLY=0
+ATTEMPTS=0
 
 # ---------- helpers ----------
 log() {
@@ -51,8 +61,18 @@ log() {
   echo "$line" >>"$LOG_FILE" 2>/dev/null || true
 }
 
+# notify <priority 1-5> <tags> <title> <message> - phone message through ntfy.
+# Quiet in --check mode and when NTFY_TOPIC is empty. Never stops the script.
+notify() {
+  [ -n "$NTFY_TOPIC" ] || return 0
+  [ "$CHECK_ONLY" = 1 ] && return 0
+  curl -fsS -m 20 -H "Title: $3" -H "Priority: $1" -H "Tags: $2" --data-binary "$4" \
+    "${NTFY_SERVER%/}/$NTFY_TOPIC" >/dev/null 2>&1 || log "ntfy: could not send '$3'."
+}
+
 die() {
   log "STOP: $*"
+  notify 4 warning "Oracle VM script stopped" "$*"
   exit 1
 }
 
@@ -74,8 +94,8 @@ config_value() { # config_value <key> - read a key from the chosen profile in th
 
 # ---------- discovery ----------
 check_tools() {
-  command -v oci >/dev/null 2>&1 || die "The OCI CLI is not installed. Mac: 'brew install oci-cli'. Linux: see README.md."
-  [ -f "$OCI_CONFIG_FILE" ] || die "No OCI config at $OCI_CONFIG_FILE. Make an API key first (README.md, step 4)."
+  command -v oci >/dev/null 2>&1 || die "The OCI CLI is not installed. See \"Install the tools\" in README.md."
+  [ -f "$OCI_CONFIG_FILE" ] || die "No OCI config at $OCI_CONFIG_FILE. Make the CLI key first (see \"Make the CLI key\" in README.md or CLAUDE.md)."
   [ -f "$SSH_PUBLIC_KEY_FILE" ] || die "No SSH public key at $SSH_PUBLIC_KEY_FILE. Run: ssh-keygen -t ed25519 -f ${SSH_PUBLIC_KEY_FILE%.pub}"
   case "$SSH_PUBLIC_KEY_FILE" in
     *.pub) ;;
@@ -212,7 +232,14 @@ report_instance() {
   log "Instance: $id"
   log "Public IP: ${ip:-not ready yet - see the Oracle console}"
   log "Log in:    ssh -i ${SSH_PUBLIC_KEY_FILE%.pub} ubuntu@${ip:-<public-ip>}"
+  notify 5 tada "Oracle VM is ready" "Region $REGION, $OCPUS OCPU / $MEMORY_GB GB. IP: ${ip:-see the Oracle console}. Log in: ssh -i ${SSH_PUBLIC_KEY_FILE%.pub} ubuntu@${ip:-<ip>}"
   printf '\a'
+}
+
+on_signal() {
+  log "Stopped by a signal after $ATTEMPTS attempts."
+  notify 3 stop_sign "Oracle VM script stopped" "Stopped by hand or by the computer after $ATTEMPTS attempts. No VM yet. Start it again to go on."
+  exit 130
 }
 
 # ---------- main loop ----------
@@ -246,15 +273,25 @@ launch_once() { # launch_once <ad> -> prints CLI output; exit code of the CLI
 }
 
 main() {
-  CHECK_ONLY=0
   case "${1:-}" in
     --check) CHECK_ONLY=1 ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
     "") ;;
     *) die "Unknown option '$1'. Use --check or no option." ;;
   esac
 
   check_tools
+  if [ "$CHECK_ONLY" = 0 ]; then
+    # Only one copy at a time: two copies could both make a network or a VM.
+    local other
+    other="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [ -n "$other" ] && ps -p "$other" -o command= 2>/dev/null | grep -q 'grab-a1'; then
+      log "Another copy is already running (pid $other). Stop it first: kill $other"
+      exit 1
+    fi
+    echo $$ >"$PID_FILE"
+    trap 'rm -f "$PID_FILE"' EXIT
+  fi
   log "Profile [$OCI_PROFILE] from $OCI_CONFIG_FILE. Asking for $SHAPE, $OCPUS OCPUs, $MEMORY_GB GB, boot volume $BOOT_VOLUME_GB GB, name '$DISPLAY_NAME'."
   check_size
   discover_tenancy
@@ -275,12 +312,17 @@ main() {
     exit 0
   fi
 
-  local attempt=0 wait="$RETRY_SECONDS" ad out kind
+  local attempt=0 pause="$RETRY_SECONDS" ad out kind last="none yet" now hb_seconds last_hb
   # shellcheck disable=SC2206
   local ads=($AVAILABILITY_DOMAINS)
+  hb_seconds="$(awk -v h="$HEARTBEAT_HOURS" 'BEGIN { printf "%d", h * 3600 }')"
+  last_hb="$(date +%s)"
+  trap on_signal INT TERM
+  notify 3 rocket "Oracle VM search started" "Trying every ${RETRY_SECONDS}s for a $OCPUS OCPU / $MEMORY_GB GB VM in $REGION. You get a message when it is ready, when it stops, and every ${HEARTBEAT_HOURS}h while it tries."
   while :; do
     for ad in "${ads[@]}"; do
-      attempt=$((attempt + 1))
+      ATTEMPTS=$((ATTEMPTS + 1))
+      attempt=$ATTEMPTS
       out="$(launch_once "$ad")"
       case "$out" in
         ocid1.instance.*)
@@ -291,9 +333,10 @@ main() {
       esac
       kind="$(classify "$out")"
       case "$kind" in
-        capacity)  log "Attempt $attempt ($ad): out of host capacity."; wait="$RETRY_SECONDS" ;;
-        throttled) wait=$((wait * 2)); [ "$wait" -gt 600 ] && wait=600; log "Attempt $attempt ($ad): too many requests. Next wait ${wait}s." ;;
+        capacity)  log "Attempt $attempt ($ad): out of host capacity."; pause="$RETRY_SECONDS"; last="out of host capacity" ;;
+        throttled) pause=$((pause * 2)); [ "$pause" -gt 600 ] && pause=600; last="too many requests"; log "Attempt $attempt ($ad): too many requests. Next wait ${pause}s." ;;
         transient)
+          last="temporary error"
           log "Attempt $attempt ($ad): temporary error. $(echo "$out" | grep -m1 -E '"message"|Error' | tr -s ' ')"
           # A launch can succeed even when the answer is lost. Check before trying again.
           found="$(existing_instance)"
@@ -303,14 +346,22 @@ main() {
             exit 0
           fi
           ;;
-        limit) echo "$out" >>"$LOG_FILE"; die "Oracle says the account limit is too low for $OCPUS OCPUs / $MEMORY_GB GB. Always Free allows $FREE_OCPUS OCPUs / $FREE_MEMORY_GB GB in total, minus what other A1 VMs use. Lower OCPUS / MEMORY_GB, or upgrade to Pay As You Go (README.md, step 2)." ;;
+        limit) echo "$out" >>"$LOG_FILE"; die "Oracle says the account limit is too low for $OCPUS OCPUs / $MEMORY_GB GB. Always Free allows $FREE_OCPUS OCPUs / $FREE_MEMORY_GB GB in total, minus what other A1 VMs use. Lower OCPUS / MEMORY_GB, or upgrade the account to Pay As You Go (see README.md)." ;;
         auth) die "Oracle refused the API key. Check $OCI_CONFIG_FILE." ;;
         *) echo "$out"; echo "$out" >>"$LOG_FILE"; die "Unexpected answer from Oracle (above). Fix it, then run the script again." ;;
       esac
       if [ "$MAX_ATTEMPTS" -gt 0 ] && [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
         die "Reached MAX_ATTEMPTS=$MAX_ATTEMPTS without a VM."
       fi
-      sleep "$wait"
+      now="$(date +%s)"
+      if [ "$hb_seconds" -gt 0 ] && [ $((now - last_hb)) -ge "$hb_seconds" ]; then
+        log "Still trying: $attempt attempts. Last answer: $last."
+        notify 2 hourglass_flowing_sand "Still trying for the Oracle VM" "$attempt attempts so far. Last answer: $last."
+        last_hb="$now"
+      fi
+      # Sleep in the background so a stop signal is handled at once.
+      sleep "$pause" &
+      wait $!
     done
   done
 }

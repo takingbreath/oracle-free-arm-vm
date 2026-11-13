@@ -1,3 +1,5 @@
 config.env
 grab-a1.log
+grab-a1.pid
 *.pem
+ntfy-qr-*.png
