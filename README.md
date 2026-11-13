@@ -18,21 +18,33 @@ When you ask for it, Oracle often answers **"Out of host capacity"**.
 Sources: [Oracle: Always Free resources](https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm),
 [InfoQ, July 2026](https://www.infoq.com/news/2026/07/oracle-cloud-free-tier-limits/).
 
-**Tip:** many users report that "Out of host capacity" stops after an upgrade to Pay As You Go.
-On our PAYG account (Mumbai, 13 Nov 2026) the first launch worked at once.
-PAYG needs a card, and everything above the free amounts costs money.
-If you upgrade, make a budget alert (Billing & Cost Management > Budgets) with a small limit.
+**Fastest way to get the VM: upgrade the account to Pay As You Go (step 2).**
 
 ## Steps
 
 1. **Make an Oracle Cloud account** at <https://www.oracle.com/cloud/free/>.
    Choose the home region with care. Free VMs exist only there.
 
-2. **Install the OCI CLI.**
+2. **Upgrade the account to Pay As You Go (do this, it is the main trick).**
+   - Why: on a free-only account, "Out of host capacity" can go on for days or weeks.
+     Many users report that the A1 VM comes at once after the upgrade.
+     On our PAYG account (Mumbai, 13 Nov 2026) the launch worked on the first try.
+   - How: Oracle console > menu > **Billing & Cost Management** > **Upgrade and Manage Payment** > **Pay As You Go**.
+     Add a credit card (or a debit card that works like a credit card; prepaid and virtual cards are refused).
+   - Oracle can put a temporary authorization hold on the card. The upgrade can take some time.
+     Wait until the console shows the account as Pay As You Go, then go on.
+   - Cost: the Always Free amounts stay free. Only use above them costs money.
+     In October 2026 our PAYG account paid 0 for a 4 OCPU / 24 GB A1 VM, but Oracle does not promise this.
+   - Safety: make a budget alert with a small limit and your email
+     (**Billing & Cost Management** > **Budgets** > **Create Budget**).
+   - On PAYG you can ask for the old size: set `OCPUS=4` and `MEMORY_GB=24` in `config.env`.
+     Keep 2 / 12 if you want to be sure it stays free.
+
+3. **Install the OCI CLI.**
    - Mac: `brew install oci-cli`
    - Linux: `bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)"`
 
-3. **Make an API key** (the CLI signs in with it).
+4. **Make an API key** (the CLI signs in with it).
    - Oracle console > profile icon (top right) > **My profile** > **API keys** (some consoles: **Tokens and keys**) > **Add API key**.
    - Choose **Generate API key pair**, click **Download private key**, then **Add**.
    - Oracle shows a "Configuration file preview". Copy it into `~/.oci/config`.
@@ -40,29 +52,29 @@ If you upgrade, make a budget alert (Billing & Cost Management > Budgets) with a
    - Run `chmod 600 ~/.oci/config ~/.oci/*.pem`.
    - Test: `oci iam availability-domain list` must print your availability domains.
 
-4. **Make an SSH key** for the VM:
+5. **Make an SSH key** for the VM:
    ```bash
    ssh-keygen -t ed25519 -f ~/.ssh/oracle_a1
    ```
 
-5. **Get this repo and set it up:**
+6. **Get this repo and set it up:**
    ```bash
    git clone https://github.com/takingbreath/oracle-free-arm-vm.git
    cd oracle-free-arm-vm
    cp config.env.example config.env     # change values only if you need to
    ```
 
-6. **Check everything, without a launch:**
+7. **Check everything, without a launch:**
    ```bash
    ./grab-a1.sh --check
    ```
 
-7. **Start it and leave it running.** It can take minutes or days.
+8. **Start it and leave it running.** It can take minutes or days.
    - Mac (keeps the Mac awake): `caffeinate -i ./grab-a1.sh`
    - Linux server: run it inside `tmux` or `screen`.
    - It writes every attempt to `grab-a1.log`.
 
-8. When it prints `SUCCESS`, log in:
+9. When it prints `SUCCESS`, log in:
    ```bash
    ssh -i ~/.ssh/oracle_a1 ubuntu@<public-ip>
    ```
@@ -97,7 +109,7 @@ All settings are in `config.env.example`, with notes. The most used:
 
 | Message | Fix |
 |---|---|
-| `account limit is too low` | Free account: lower `OCPUS`/`MEMORY_GB` to 2/12 or less, minus other A1 VMs. |
+| `account limit is too low` | Free account: lower `OCPUS`/`MEMORY_GB` to 2/12 or less, minus other A1 VMs. Or upgrade to Pay As You Go (step 2). |
 | `cannot sign in` / `refused the API key` | Check `~/.oci/config` (user, fingerprint, key_file, tenancy). |
 | `your home region is ...` | Set `region=` in `~/.oci/config` to the home region. |
 | `Unexpected answer from Oracle` | Read Oracle's message above it. Fix it, then run again. |

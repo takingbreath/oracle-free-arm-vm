@@ -75,7 +75,7 @@ config_value() { # config_value <key> - read a key from the chosen profile in th
 # ---------- discovery ----------
 check_tools() {
   command -v oci >/dev/null 2>&1 || die "The OCI CLI is not installed. Mac: 'brew install oci-cli'. Linux: see README.md."
-  [ -f "$OCI_CONFIG_FILE" ] || die "No OCI config at $OCI_CONFIG_FILE. Make an API key first (README.md, step 3)."
+  [ -f "$OCI_CONFIG_FILE" ] || die "No OCI config at $OCI_CONFIG_FILE. Make an API key first (README.md, step 4)."
   [ -f "$SSH_PUBLIC_KEY_FILE" ] || die "No SSH public key at $SSH_PUBLIC_KEY_FILE. Run: ssh-keygen -t ed25519 -f ${SSH_PUBLIC_KEY_FILE%.pub}"
   case "$SSH_PUBLIC_KEY_FILE" in
     *.pub) ;;
@@ -303,7 +303,7 @@ main() {
             exit 0
           fi
           ;;
-        limit) echo "$out" >>"$LOG_FILE"; die "Oracle says the account limit is too low for $OCPUS OCPUs / $MEMORY_GB GB. Always Free allows $FREE_OCPUS OCPUs / $FREE_MEMORY_GB GB in total, minus what other A1 VMs use. Lower OCPUS / MEMORY_GB." ;;
+        limit) echo "$out" >>"$LOG_FILE"; die "Oracle says the account limit is too low for $OCPUS OCPUs / $MEMORY_GB GB. Always Free allows $FREE_OCPUS OCPUs / $FREE_MEMORY_GB GB in total, minus what other A1 VMs use. Lower OCPUS / MEMORY_GB, or upgrade to Pay As You Go (README.md, step 2)." ;;
         auth) die "Oracle refused the API key. Check $OCI_CONFIG_FILE." ;;
         *) echo "$out"; echo "$out" >>"$LOG_FILE"; die "Unexpected answer from Oracle (above). Fix it, then run the script again." ;;
       esac
